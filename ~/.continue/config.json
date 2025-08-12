@@ -1,0 +1,10 @@
+{
+  "models": [
+    {
+      "title": "Free Local AI",
+      "model": "mistral",
+      "apiBase": "http://localhost:11434",
+      "provider": "ollama"
+    }
+  ]
+}

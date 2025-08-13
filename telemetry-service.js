@@ -1,4 +1,4 @@
-const vscode = require('vscode');
+const vscode = require("vscode");
 
 class TelemetryService {
   constructor(context) {
@@ -8,8 +8,8 @@ class TelemetryService {
 
   getTelemetrySettings() {
     // Check extension's telemetry settings
-    const config = vscode.workspace.getConfiguration('realtimeAiEditor');
-    return config.get('telemetryEnabled', true);
+    const config = vscode.workspace.getConfiguration("realtimeAiEditor");
+    return config.get("telemetryEnabled", true);
   }
 
   isEnabled() {
@@ -26,12 +26,12 @@ class TelemetryService {
     console.error(`[Telemetry] Error in ${context}:`, {
       message: error.message,
       stack: error.stack,
-      code: error.code || 'UNKNOWN_ERROR',
-      timestamp: new Date().toISOString()
+      code: error.code || "UNKNOWN_ERROR",
+      timestamp: new Date().toISOString(),
     });
   }
 
-  async logEvent(eventName, properties) {
+  async logEvent(eventName, properties = {}) {
     if (!this.isEnabled()) return;
 
     // In a real implementation, this would send the event to a telemetry service
@@ -39,16 +39,19 @@ class TelemetryService {
     console.log(`[Telemetry] Event: ${eventName}`, properties);
   }
 
-  async logFeatureUsage(featureName) {
-    return this.logEvent('feature_used', { feature: featureName });
+  async logFeatureUsage(featureName, properties = {}) {
+    return this.logEvent("feature_used", {
+      feature: featureName,
+      ...properties,
+    });
   }
 
   async logUpgradePromptShown(feature) {
-    return this.logEvent('upgrade_prompt_shown', { feature });
+    return this.logEvent("upgrade_prompt_shown", { feature });
   }
 
   async logUpgradePromptClicked() {
-    return this.logEvent('upgrade_prompt_clicked');
+    return this.logEvent("upgrade_prompt_clicked");
   }
 }
 

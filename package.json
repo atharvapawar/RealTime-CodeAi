@@ -17,24 +17,38 @@
     "Extension Packs"
   ],
   "activationEvents": [
-    "onCommand:realtime-ai-editor.openAssistant",
-    "onCommand:realtime-ai-editor.refreshDocs",
-    "onCommand:realtime-ai-editor.getContextualHelp"
+    "onStartupFinished"
   ],
   "main": "./extension.js",
   "contributes": {
     "commands": [
       {
         "command": "realtime-ai-editor.openAssistant",
-        "title": "Open RealTime AI Assistant"
+        "title": "RealTime AI Editor: Open Assistant"
       },
       {
         "command": "realtime-ai-editor.refreshDocs",
-        "title": "Refresh Documentation"
+        "title": "RealTime AI Editor: Refresh Documentation"
       },
       {
         "command": "realtime-ai-editor.getContextualHelp",
-        "title": "Get Contextual AI Help"
+        "title": "RealTime AI Editor: Get Contextual AI Help"
+      },
+      {
+        "command": "realtime-ai-editor.getCurrentContext",
+        "title": "RealTime AI Editor: Show Current Context"
+      },
+      {
+        "command": "realtime-ai-editor.getCodeSuggestions",
+        "title": "RealTime AI Editor: Get Code Suggestions"
+      },
+      {
+        "command": "realtime-ai-editor.searchDocs",
+        "title": "RealTime AI Editor: Search Documentation"
+      },
+      {
+        "command": "realtime-ai-editor.openSettings",
+        "title": "RealTime AI Editor: Open Settings"
       }
     ],
     "keybindings": [
@@ -49,21 +63,60 @@
         "key": "ctrl+shift+h",
         "mac": "cmd+shift+h",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "realtime-ai-editor.getCurrentContext",
+        "key": "ctrl+shift+c",
+        "mac": "cmd+shift+c",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "realtime-ai-editor.getCodeSuggestions",
+        "key": "ctrl+shift+;",
+        "mac": "cmd+shift+;",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "realtime-ai-editor.searchDocs",
+        "key": "ctrl+shift+d",
+        "mac": "cmd+shift+d",
+        "when": "editorTextFocus"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "RealTime AI Editor",
+      "properties": {
+        "realtimeAiEditor.telemetryEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enables anonymous telemetry for feature usage and error reporting to improve the extension."
+        },
+        "realtimeAiEditor.contextDepth": {
+          "type": "string",
+          "enum": [
+            "file",
+            "project",
+            "workspace"
+          ],
+          "default": "file",
+          "description": "Controls how much context the assistant uses: current file, project folder, or entire workspace."
+        }
+      }
+    }
   },
   "scripts": {
     "package": "vsce package",
     "publish": "vsce publish",
-    "watch": "code --extensionDevelopmentPath=."
+    "watch": "code --extensionDevelopmentPath=.",
+    "test": "node ./tests/run-tests.js"
   },
   "dependencies": {
+    "@vscode/codicons": "^0.0.35",
     "axios": "^1.6.7",
     "cheerio": "^1.0.0-rc.12",
     "chromadb": "^1.8.1",
-    "marked": "^11.1.1",
-    "highlight.js": "^11.9.0",
-    "@vscode/codicons": "^0.0.35"
+    "highlight.js": "^11.11.1",
+    "marked": "^11.2.0"
   },
   "devDependencies": {
     "@types/vscode": "^1.89.0"

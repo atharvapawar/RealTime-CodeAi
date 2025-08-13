@@ -2,21 +2,25 @@ const vscode = require("vscode");
 const path = require("path");
 const ContextExtractor = require("./context-extractor");
 const DocDiffer = require("./doc-differ");
+const DocumentationService = require("./documentation-service");
 const TelemetryService = require("./telemetry-service");
 const marked = require("marked");
 const hljs = require("highlight.js");
 
 class WebviewPanel {
-  constructor(context, contextExtractor, docDiffer) {
+  constructor(context, contextExtractor, docDiffer, onDocStatusChange) {
     this.context = context;
     this.panel = null;
     this.disposables = [];
     this.contextExtractor = contextExtractor || new ContextExtractor();
     this.docDiffer =
       docDiffer || new DocDiffer(context.asAbsolutePath("nextjs-docs.json"));
+    this.documentationService = new DocumentationService();
     this.messageHistory = [];
     this.isProcessing = false;
     this.telemetryService = new TelemetryService(context);
+    this.onDocStatusChange =
+      typeof onDocStatusChange === "function" ? onDocStatusChange : null;
 
     // Configure marked with syntax highlighting
     marked.setOptions({
@@ -27,6 +31,58 @@ class WebviewPanel {
         return hljs.highlightAuto(code).value;
       },
     });
+  }
+
+  sendRefreshResult(processResult) {
+    const differences =
+      processResult && processResult.differences
+        ? processResult.differences
+        : null;
+    if (this.panel && differences) {
+      this.panel.webview.postMessage({
+        command: "refreshStatus",
+        status: `Documentation refreshed! New: ${differences.newCount}, Updated: ${differences.updatedCount}, Removed: ${differences.removedCount}`,
+        isRefreshing: false,
+        summary: {
+          totalNewDocs: differences.newCount,
+          totalUpdatedDocs: differences.updatedCount,
+          totalRemovedDocs: differences.removedCount,
+        },
+      });
+    }
+    if (this.onDocStatusChange && differences) {
+      this.onDocStatusChange({
+        isRefreshing: false,
+        text: `New ${differences.newCount} · Updated ${differences.updatedCount} · Removed ${differences.removedCount}`,
+      });
+    }
+  }
+
+  sendRefreshError(message) {
+    if (this.panel) {
+      this.panel.webview.postMessage({
+        command: "refreshStatus",
+        status: `Error: ${message}`,
+        isRefreshing: false,
+      });
+    }
+    if (this.onDocStatusChange) {
+      this.onDocStatusChange({
+        isRefreshing: false,
+        error: true,
+        text: "Error refreshing docs",
+      });
+    }
+  }
+
+  _getNonce() {
+    const possible =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let text = "";
+    for (let i = 0; i < 32; i++) {
+      text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
   }
 
   createOrShow() {
@@ -79,6 +135,9 @@ class WebviewPanel {
           case "openSettings":
             this.showSettingsPage();
             return;
+          case "lookupDocs":
+            this.handleDocumentationQuery(message.query, message.type);
+            return;
         }
       },
       null,
@@ -86,7 +145,144 @@ class WebviewPanel {
     );
   }
 
+  async handleDocumentationQuery(query, type = null) {
+    // Validate input
+    if (!query || query.trim() === '') {
+      this.panel.webview.postMessage({
+        command: "docResponse",
+        text: "## Documentation Search Error\n\nPlease provide a search query.",
+        status: "error",
+        isMarkdown: true,
+      });
+      return;
+    }
+    
+    // Check if already processing
+    if (this.isProcessing) {
+      this.panel.webview.postMessage({
+        command: "docResponse",
+        text: "I'm still processing your previous request. Please wait a moment...",
+        status: "info",
+        isMarkdown: false,
+      });
+      return;
+    }
+
+    this.isProcessing = true;
+
+    // Send processing message
+    this.panel.webview.postMessage({
+      command: "docResponse",
+      text: "Searching for documentation...",
+      status: "processing",
+      isMarkdown: false,
+    });
+
+    try {
+      // Log telemetry for documentation lookup
+      this.telemetryService.logFeatureUsage('documentation_lookup', { query, type: type || 'auto' });
+
+      // Fetch documentation from the service with timeout
+      const docResult = await Promise.race([
+        this.documentationService.getDocumentation(query, type),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Documentation search timed out after 15 seconds')), 15000)
+        )
+      ]);
+
+      // Format the documentation result as markdown
+      let formattedResult = '';
+      
+      if (docResult.error) {
+        formattedResult = `## Documentation Search Error
+
+${docResult.error}\n\nTry refining your search query or selecting a different documentation source.`;
+      } else {
+        formattedResult = `## ${docResult.source} Documentation
+
+`;
+        
+        if (docResult.title) {
+          formattedResult += `### ${docResult.title}\n\n`;
+        }
+        
+        if (docResult.description) {
+          formattedResult += `${docResult.description}\n\n`;
+        }
+        
+        if (docResult.url) {
+          formattedResult += `**Source:** [${docResult.url}](${docResult.url})\n\n`;
+        }
+        
+        if (docResult.content) {
+          formattedResult += `### Content\n\n${docResult.content}\n\n`;
+        }
+        
+        if (docResult.results) {
+          formattedResult += `### Results\n\n`;
+          
+          if (Array.isArray(docResult.results)) {
+            docResult.results.forEach((result, index) => {
+              formattedResult += `#### Result ${index + 1}\n\n`;
+              
+              if (result.title) {
+                formattedResult += `**${result.title}**\n\n`;
+              }
+              
+              if (result.link) {
+                formattedResult += `[View on ${result.source || 'Source'}](${result.link})\n\n`;
+              }
+              
+              if (result.content) {
+                formattedResult += `${result.content}\n\n`;
+              }
+            });
+          } else {
+            // If results is not an array, it might be an object with nested data
+            formattedResult += `${JSON.stringify(docResult.results, null, 2)}\n\n`;
+          }
+        }
+      }
+
+      // Send the formatted documentation back to the webview
+      this.panel.webview.postMessage({
+        command: "docResponse",
+        text: formattedResult,
+        status: "success",
+        isMarkdown: true,
+        source: docResult.source,
+        query: query,
+        type: type
+      });
+    } catch (error) {
+      console.error('Error fetching documentation:', error);
+      
+      // Send error message
+      this.panel.webview.postMessage({
+        command: "docResponse",
+        text: `## Error Fetching Documentation
+
+Sorry, there was an error while fetching documentation: ${error.message}\n\nPlease try again with a more specific query or select a different documentation source.`,
+        status: "error",
+        isMarkdown: true
+      });
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
   async handleAiQuery(query, providedContext = null, providedDocs = null) {
+    // Validate input
+    if (!query || query.trim() === '') {
+      this.panel.webview.postMessage({
+        command: "aiResponse",
+        text: "Please provide a query.",
+        status: "error",
+        isMarkdown: false,
+      });
+      return;
+    }
+    
     if (this.isProcessing) {
       this.panel.webview.postMessage({
         command: "aiResponse",
@@ -110,18 +306,35 @@ class WebviewPanel {
       isMarkdown: false,
     });
 
-    // No need to check for special commands here as they're handled in the message event listener
+    // Log telemetry for AI query
+    this.telemetryService.logFeatureUsage('ai_query', { queryLength: query.length });
 
     try {
-      // Use provided context and docs if available, otherwise fetch them
-      const context =
-        providedContext ||
-        (await this.contextExtractor.extractActiveEditorContext());
+      // Use provided context and docs if available, otherwise fetch them with timeout
+      const contextPromise = providedContext ? 
+        Promise.resolve(providedContext) : 
+        Promise.race([
+          this.contextExtractor.extractActiveEditorContext(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Context extraction timed out')), 10000))
+        ]);
+      
+      const context = await contextPromise;
       let relevantDocs = providedDocs || [];
 
-      // If docs weren't provided, fetch them
+      // If docs weren't provided, fetch them with timeout
       if (!providedDocs && context) {
-        relevantDocs = await this.contextExtractor.findRelevantDocs(context, 5);
+        const docsPromise = Promise.race([
+          this.contextExtractor.findRelevantDocs(context, 5),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Documentation search timed out')), 10000))
+        ]);
+        
+        try {
+          relevantDocs = await docsPromise;
+        } catch (docError) {
+          console.warn('Error fetching relevant docs:', docError);
+          // Continue without docs if there's an error
+          relevantDocs = [];
+        }
       }
 
       // Check collection status
@@ -184,11 +397,25 @@ class WebviewPanel {
       });
     } catch (error) {
       console.error("Error processing AI query:", error);
+      
+      // Provide more helpful error messages based on error type
+      let errorMessage = "I encountered an error while processing your request.";
+      
+      if (error.message.includes('timed out')) {
+        errorMessage = "The operation timed out. This might be due to high server load or complexity of your query.";
+      } else if (error.message.includes('context')) {
+        errorMessage = "I had trouble understanding the code context. Please make sure you have an active editor open with code.";
+      } else if (error.message.includes('network') || error.message.includes('connection')) {
+        errorMessage = "There seems to be a network issue. Please check your internet connection and try again.";
+      } else {
+        errorMessage += ` Error details: ${error.message}`;
+      }
+      
       this.panel.webview.postMessage({
         command: "aiResponse",
-        text: `I encountered an error while processing your request: ${error.message}. Please try again.`,
+        text: `## Error Processing Query\n\n${errorMessage}\n\nPlease try again with a simpler query or try later.`,
         status: "error",
-        isMarkdown: false,
+        isMarkdown: true,
       });
     } finally {
       this.isProcessing = false;
@@ -207,6 +434,9 @@ class WebviewPanel {
 
     this.isProcessing = true;
 
+    // Log telemetry for documentation refresh
+    this.telemetryService.logFeatureUsage('documentation_refresh');
+
     this.panel.webview.postMessage({
       command: "refreshStatus",
       status: "Refreshing documentation...",
@@ -214,8 +444,13 @@ class WebviewPanel {
     });
 
     try {
-      // Process the documentation
-      const processResult = await this.docDiffer.processDocs();
+      // Process the documentation with timeout
+      const processPromise = Promise.race([
+        this.docDiffer.processDocs(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Documentation processing timed out after 30 seconds')), 30000))
+      ]);
+      
+      const processResult = await processPromise;
       if (!processResult.success) {
         throw new Error(
           processResult.error || "Failed to process documentation"
@@ -224,9 +459,13 @@ class WebviewPanel {
 
       // Update the vector database with latest docs
       const docsForChroma = this.docDiffer.getDocsForChroma();
-      const updateResult = await this.contextExtractor.updateCollection(
-        docsForChroma
-      );
+      
+      const updatePromise = Promise.race([
+        this.contextExtractor.updateCollection(docsForChroma),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Vector database update timed out after 30 seconds')), 30000))
+      ]);
+      
+      const updateResult = await updatePromise;
       if (!updateResult.success) {
         throw new Error(
           updateResult.error || "Failed to update vector database"
@@ -244,7 +483,15 @@ class WebviewPanel {
           totalNewDocs: differences.newCount,
           totalUpdatedDocs: differences.updatedCount,
           totalRemovedDocs: differences.removedCount,
+          timestamp: new Date().toISOString()
         },
+      });
+
+      // Log telemetry for successful refresh
+      this.telemetryService.logFeatureUsage('documentation_refresh_success', {
+        newCount: differences.newCount,
+        updatedCount: differences.updatedCount,
+        removedCount: differences.removedCount
       });
 
       // Also send a message to the chat
@@ -257,23 +504,49 @@ I've refreshed the documentation database:
 - ${differences.updatedCount} documents updated
 - ${differences.removedCount} documents removed
 
-You now have access to the latest Next.js and Tailwind CSS documentation!`,
+You now have access to the latest documentation!`,
         status: "info",
         isMarkdown: true,
       });
     } catch (error) {
       console.error("Error refreshing docs:", error);
+      
+      // Log telemetry for refresh failure
+      this.telemetryService.logFeatureUsage('documentation_refresh_error', {
+        errorType: error.name,
+        errorMessage: error.message
+      });
+      
+      // Provide more helpful error messages based on error type
+      let errorMessage = "I encountered an error while refreshing the documentation.";
+      let errorDetails = error.message;
+      
+      if (error.message.includes('timed out')) {
+        errorMessage = "The documentation refresh operation timed out.";
+        errorDetails = "This might be due to a large number of documents or server load.";
+      } else if (error.message.includes('network') || error.message.includes('connection')) {
+        errorMessage = "There was a network issue while refreshing documentation.";
+        errorDetails = "Please check your internet connection and try again.";
+      }
+      
       this.panel.webview.postMessage({
         command: "refreshStatus",
-        status: `Error: ${error.message}`,
+        status: `Error: ${errorMessage}`,
         isRefreshing: false,
+        error: true
       });
 
       this.panel.webview.postMessage({
         command: "aiResponse",
-        text: `I encountered an error while refreshing the documentation: ${error.message}. Please try again later.`,
+        text: `## Documentation Refresh Error
+
+${errorMessage}
+
+${errorDetails}
+
+Please try again later.`,
         status: "error",
-        isMarkdown: false,
+        isMarkdown: true,
       });
     } finally {
       this.isProcessing = false;
@@ -281,6 +554,7 @@ You now have access to the latest Next.js and Tailwind CSS documentation!`,
   }
 
   _getHtmlForWebview() {
+    const nonce = this._getNonce();
     // Get path to media resources
     const scriptUri = this.panel.webview.asWebviewUri(
       vscode.Uri.file(path.join(this.context.extensionPath, "media", "main.js"))
@@ -339,13 +613,13 @@ You now have access to the latest Next.js and Tailwind CSS documentation!`,
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${this.panel.webview.cspSource} https:; script-src ${this.panel.webview.cspSource}; style-src ${this.panel.webview.cspSource} 'unsafe-inline'; font-src ${this.panel.webview.cspSource};">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${this.panel.webview.cspSource} https:; script-src ${this.panel.webview.cspSource} 'nonce-${nonce}'; style-src ${this.panel.webview.cspSource} 'unsafe-inline'; font-src ${this.panel.webview.cspSource};">
         <title>RealTime AI Editor</title>
         <link href="${codiconsUri}" rel="stylesheet" />
         <link href="${highlightCssUri}" rel="stylesheet" />
-        <script src="${markedUri}"></script>
-        <script src="${highlightJsUri}"></script>
-        <style>
+        <script nonce="${nonce}" src="${markedUri}"></script>
+        <script nonce="${nonce}" src="${highlightJsUri}"></script>
+        <style nonce="${nonce}">
           body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
             padding: 0;
@@ -629,6 +903,111 @@ You now have access to the latest Next.js and Tailwind CSS documentation!`,
             padding: 12px;
             border-radius: 5px;
             overflow-x: auto;
+          }
+          
+          /* Documentation Page Styles */
+          .documentation-page {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            padding: 20px;
+          }
+          
+          .documentation-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+          }
+          
+          .documentation-title {
+            font-size: 1.5em;
+            font-weight: bold;
+          }
+          
+          .documentation-back {
+            background-color: transparent;
+            border: none;
+            color: var(--vscode-button-foreground);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            padding: 4px 8px;
+            border-radius: 4px;
+          }
+          
+          .documentation-back:hover {
+            background-color: var(--vscode-button-hoverBackground);
+          }
+          
+          .documentation-search {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-bottom: 20px;
+          }
+          
+          .documentation-search-row {
+            display: flex;
+            gap: 10px;
+          }
+          
+          .documentation-search input {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid var(--vscode-input-border);
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border-radius: 4px;
+          }
+          
+          .documentation-search select {
+            padding: 8px 12px;
+            border: 1px solid var(--vscode-dropdown-border);
+            background-color: var(--vscode-dropdown-background);
+            color: var(--vscode-dropdown-foreground);
+            border-radius: 4px;
+          }
+          
+          .documentation-search button {
+            padding: 8px 16px;
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+          }
+          
+          .documentation-search button:hover {
+            background-color: var(--vscode-button-hoverBackground);
+          }
+          
+          .documentation-result {
+            flex: 1;
+            overflow-y: auto;
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            padding: 16px;
+            background-color: var(--vscode-editor-background);
+          }
+          
+          .documentation-source {
+            margin-top: 10px;
+            font-style: italic;
+            color: var(--vscode-descriptionForeground);
+            display: flex;
+            align-items: center;
+            gap: 5px;
+          }
+          
+          .documentation-source a {
+            color: var(--vscode-textLink-foreground);
+            text-decoration: none;
+          }
+          
+          .documentation-source a:hover {
+            text-decoration: underline;
+          }
             margin: 12px 0;
           }
           .markdown-body pre code {
@@ -695,6 +1074,9 @@ You now have access to the latest Next.js and Tailwind CSS documentation!`,
             <button class="toolbar-button" id="docs-search">
               <i class="codicon codicon-book"></i> Search Docs
             </button>
+            <button class="toolbar-button" id="api-docs">
+              <i class="codicon codicon-library"></i> API Docs
+            </button>
             <button class="toolbar-button" id="settings-button">
               <i class="codicon codicon-gear"></i> Settings
             </button>
@@ -731,7 +1113,7 @@ You now have access to the latest Next.js and Tailwind CSS documentation!`,
           </div>
         </div>
         
-        <script src="${scriptUri}"></script>
+        <script nonce="${nonce}" src="${scriptUri}"></script>
       </body>
       </html>
     `;
@@ -861,31 +1243,61 @@ Query: "${query}"
    * @param {Object} settings - The settings to save
    */
   async saveSettings(settings) {
-    // Update VS Code configuration
-    const config = vscode.workspace.getConfiguration("realtimeAiEditor");
+    try {
+      // Validate settings
+      if (!settings || typeof settings !== 'object') {
+        throw new Error('Invalid settings object');
+      }
 
-    // Update telemetry setting
-    if (settings.telemetryEnabled !== undefined) {
-      await config.update(
-        "telemetryEnabled",
-        settings.telemetryEnabled,
-        vscode.ConfigurationTarget.Global
-      );
+      // Update VS Code configuration
+      const config = vscode.workspace.getConfiguration("realtimeAiEditor");
+      const updatedSettings = {};
+
+      // Update telemetry setting
+      if (settings.telemetryEnabled !== undefined) {
+        await config.update(
+          "telemetryEnabled",
+          settings.telemetryEnabled,
+          vscode.ConfigurationTarget.Global
+        );
+        updatedSettings.telemetryEnabled = settings.telemetryEnabled;
+      }
+
+      // Update context depth setting
+      if (settings.contextDepth !== undefined) {
+        // Validate context depth is a number and within reasonable range
+        const contextDepth = parseInt(settings.contextDepth);
+        if (isNaN(contextDepth) || contextDepth < 1 || contextDepth > 10) {
+          throw new Error('Context depth must be a number between 1 and 10');
+        }
+        
+        await config.update(
+          "contextDepth",
+          contextDepth,
+          vscode.ConfigurationTarget.Global
+        );
+        updatedSettings.contextDepth = contextDepth;
+      }
+
+      // Log telemetry for settings update
+      this.telemetryService.logFeatureUsage('settings_updated', updatedSettings);
+
+      // Notify webview that settings were saved
+      this.panel.webview.postMessage({
+        command: "settingsSaved",
+        status: "success",
+        message: "Settings saved successfully"
+      });
+    } catch (error) {
+      console.error('Error saving settings:', error);
+      
+      // Notify webview of error
+      this.panel.webview.postMessage({
+        command: "settingsSaved",
+        status: "error",
+        message: `Error saving settings: ${error.message}`
+      });
     }
-
-    // Update context depth setting
-    if (settings.contextDepth !== undefined) {
-      await config.update(
-        "contextDepth",
-        settings.contextDepth,
-        vscode.ConfigurationTarget.Global
-      );
-    }
-
-    // Notify webview that settings were saved
-    this.panel.webview.postMessage({
-      command: "settingsSaved",
-    });
 
     // Log settings update
     if (this.telemetryService) {

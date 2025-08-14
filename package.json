@@ -27,6 +27,10 @@
         "title": "RealTime AI Editor: Open Assistant"
       },
       {
+        "command": "realtime-ai-editor.lookupDocs",
+        "title": "RealTime AI Editor: Lookup Documentation"
+      },
+      {
         "command": "realtime-ai-editor.refreshDocs",
         "title": "RealTime AI Editor: Refresh Documentation"
       },

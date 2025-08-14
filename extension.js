@@ -546,6 +546,7 @@ async function activate(context) {
     getCurrentContext,
     getCodeSuggestions,
     searchDocs,
+    openSettings,
     inlineProvider,
     webviewPanel
   );
